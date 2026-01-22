@@ -9,6 +9,7 @@ from config import (
     DISCORD_TOKEN,
     NOTIFICATION_CHANNEL_ID,
     REMINDER_MINUTES_BEFORE,
+    WEBHOOK_PORT,
     TaskStatus,
     STATUS_EMOJIS,
 )
@@ -18,6 +19,7 @@ from views import (
     TaskActionView,
     TaskListView,
 )
+from github_webhook import GitHubWebhookHandler
 
 
 class TaskBot(commands.Bot):
@@ -44,6 +46,17 @@ class TaskBot(commands.Bot):
         # Start background task
         self.reminder_task.start()
         print("Reminder task started!")
+
+        # Start GitHub webhook server
+        self.webhook_handler = GitHubWebhookHandler(self)
+        await self.webhook_handler.start(port=WEBHOOK_PORT)
+        print(f"GitHub Webhook server started on port {WEBHOOK_PORT}!")
+
+    async def close(self):
+        """Cleanup khi bot shutdown."""
+        if hasattr(self, "webhook_handler"):
+            await self.webhook_handler.stop()
+        await super().close()
 
     async def on_ready(self):
         print(f"Bot is ready! Logged in as {self.user}")
