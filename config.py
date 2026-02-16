@@ -18,6 +18,10 @@ REMINDER_MINUTES_BEFORE = int(os.getenv("REMINDER_MINUTES_BEFORE", "60"))
 # Database
 DATABASE_PATH = "tasks.db"
 
+# Penalty Configuration (đơn vị: nghìn đồng)
+BASE_PENALTY = 20       # Phạt ngày đầu tiên: 20k
+PENALTY_INCREMENT = 10  # Mỗi ngày sau tăng thêm: 10k
+
 # Task Status
 class TaskStatus:
     TODO = "TODO"

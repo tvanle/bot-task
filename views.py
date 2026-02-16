@@ -3,6 +3,7 @@ from discord import ui
 from config import TaskStatus, STATUS_COLORS, STATUS_EMOJIS
 from datetime import datetime
 import database
+from database import calculate_penalty
 
 
 def format_datetime(dt_str: str) -> str:
@@ -73,6 +74,31 @@ def create_task_embed(task: dict) -> discord.Embed:
             embed.add_field(
                 name="⏳ Còn lại",
                 value=time_str,
+                inline=True,
+            )
+
+    # Hiển thị tiền phạt
+    if task.get("excused"):
+        embed.add_field(
+            name="💰 Tiền phạt",
+            value="~~Đã miễn phạt~~",
+            inline=True,
+        )
+    elif status == TaskStatus.LATE:
+        days_late, penalty = calculate_penalty(task["end_date"])
+        embed.add_field(
+            name="💰 Tiền phạt (đang tính)",
+            value=f"**{days_late}** ngày trễ → **{penalty}k**",
+            inline=True,
+        )
+    elif status == TaskStatus.DONE and task.get("completed_at"):
+        end_date = datetime.fromisoformat(task["end_date"])
+        completed_at = datetime.fromisoformat(task["completed_at"])
+        if completed_at > end_date:
+            days_late, penalty = calculate_penalty(task["end_date"], task["completed_at"])
+            embed.add_field(
+                name="💰 Tiền phạt (đã khóa)",
+                value=f"**{days_late}** ngày trễ → **{penalty}k**",
                 inline=True,
             )
 
@@ -151,6 +177,75 @@ def create_task_list_embed(tasks: list, title: str, user: discord.User = None) -
     return embeds
 
 
+def create_penalty_embed(user: discord.User, tasks: list) -> discord.Embed:
+    """Tạo embed hiển thị chi tiết phạt cho 1 user."""
+    if not tasks:
+        embed = discord.Embed(
+            title=f"💰 Tiền phạt của {user.display_name}",
+            description="Không có task trễ hạn nào!",
+            color=0x2ecc71,
+        )
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+        return embed
+
+    total_penalty = 0
+    description_lines = []
+
+    for task in tasks:
+        completed_at_str = task.get("completed_at")
+        days_late, penalty = calculate_penalty(task["end_date"], completed_at_str)
+        total_penalty += penalty
+
+        status_label = "đã khóa" if task["status"] == TaskStatus.DONE else "đang tính"
+        description_lines.append(
+            f"**#{task['id']}**: {task['description'][:40]}\n"
+            f"  ⏰ {days_late} ngày trễ → **{penalty}k** ({status_label})"
+        )
+
+    embed = discord.Embed(
+        title=f"💰 Tiền phạt của {user.display_name}",
+        description="\n\n".join(description_lines),
+        color=0xe74c3c,
+    )
+    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    embed.add_field(
+        name="💵 TỔNG PHẠT",
+        value=f"**{total_penalty}k** ({total_penalty * 1000:,}đ)",
+        inline=False,
+    )
+    return embed
+
+
+def create_penalties_board_embed(penalty_data: list) -> discord.Embed:
+    """Tạo embed bảng xếp hạng phạt team.
+
+    penalty_data: list of (user_id, user_name, total_penalty, task_count)
+    """
+    if not penalty_data:
+        return discord.Embed(
+            title="💰 Bảng Xếp Hạng Phạt Team",
+            description="Không có ai bị phạt! Team làm việc tốt lắm!",
+            color=0x2ecc71,
+        )
+
+    description_lines = []
+    medals = ["🥇", "🥈", "🥉"]
+
+    for i, (user_id, user_name, total_penalty, task_count) in enumerate(penalty_data):
+        medal = medals[i] if i < 3 else f"**{i+1}.**"
+        description_lines.append(
+            f"{medal} <@{user_id}> — **{total_penalty}k** ({total_penalty * 1000:,}đ) | {task_count} task trễ"
+        )
+
+    embed = discord.Embed(
+        title="💰 Bảng Xếp Hạng Phạt Team",
+        description="\n".join(description_lines),
+        color=0xe74c3c,
+    )
+    embed.set_footer(text="Công thức: Ngày 1 = 20k, mỗi ngày sau +10k | Tổng N ngày = 5N² + 15N (nghìn đồng)")
+    return embed
+
+
 class TaskStatusSelect(ui.Select):
     """Dropdown menu để chọn trạng thái task."""
 
@@ -212,6 +307,11 @@ class TaskStatusSelect(ui.Select):
             return
 
         await database.update_task_status(self.task_id, new_status)
+
+        # Ghi nhận thời điểm hoàn thành nếu chuyển sang DONE
+        if new_status == TaskStatus.DONE:
+            await database.mark_task_completed(self.task_id)
+
         updated_task = await database.get_task_by_id(self.task_id)
 
         # Cập nhật embed
@@ -268,6 +368,11 @@ class TaskActionView(ui.View):
             return
 
         await database.update_task_status(self.task_id, new_status)
+
+        # Ghi nhận thời điểm hoàn thành nếu chuyển sang DONE
+        if new_status == TaskStatus.DONE:
+            await database.mark_task_completed(self.task_id)
+
         updated_task = await database.get_task_by_id(self.task_id)
 
         # Cập nhật embed

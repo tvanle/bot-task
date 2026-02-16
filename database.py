@@ -1,7 +1,7 @@
 import aiosqlite
 from datetime import datetime
-from typing import Optional, List
-from config import DATABASE_PATH, TaskStatus
+from typing import Optional, List, Tuple
+from config import DATABASE_PATH, TaskStatus, BASE_PENALTY, PENALTY_INCREMENT
 
 
 async def init_db():
@@ -25,6 +25,17 @@ async def init_db():
                 reminder_sent INTEGER DEFAULT 0
             )
         """)
+
+        # Migration: thêm cột mới cho hệ thống phạt
+        for col, col_def in [
+            ("completed_at", "TEXT"),
+            ("excused", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # Cột đã tồn tại
+
         await db.commit()
 
 
@@ -198,3 +209,93 @@ async def delete_task(task_id: int) -> bool:
         cursor = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def mark_task_completed(task_id: int):
+    """Ghi nhận thời điểm hoàn thành task (để khóa phạt)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE tasks SET completed_at = ?, updated_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), datetime.now().isoformat(), task_id),
+        )
+        await db.commit()
+
+
+async def excuse_task(task_id: int) -> bool:
+    """Miễn phạt cho task. Trả về True nếu thành công."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE tasks SET excused = 1, updated_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), task_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_late_tasks_by_user(user_id: int) -> List[dict]:
+    """Lấy task trễ hạn của user (LATE hoặc DONE trễ), chưa excused."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM tasks
+            WHERE assignee_id = ?
+            AND excused = 0
+            AND (
+                status = ?
+                OR (status = ? AND completed_at > end_date)
+            )
+            ORDER BY end_date ASC
+            """,
+            (user_id, TaskStatus.LATE, TaskStatus.DONE),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_all_late_tasks() -> List[dict]:
+    """Lấy tất cả task trễ hạn chưa excused."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM tasks
+            WHERE excused = 0
+            AND (
+                status = ?
+                OR (status = ? AND completed_at > end_date)
+            )
+            ORDER BY assignee_id, end_date ASC
+            """,
+            (TaskStatus.LATE, TaskStatus.DONE),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def calculate_penalty(end_date_str: str, completed_at_str: str = None) -> Tuple[int, int]:
+    """Tính tiền phạt dựa trên số ngày trễ.
+
+    - Nếu đã hoàn thành (completed_at): tính từ end_date → completed_at
+    - Nếu chưa: tính từ end_date → now
+    Returns: (days_late, penalty) — penalty đơn vị nghìn đồng
+    """
+    end_date = datetime.fromisoformat(end_date_str)
+    if completed_at_str:
+        reference = datetime.fromisoformat(completed_at_str)
+    else:
+        reference = datetime.now()
+
+    delta = reference - end_date
+    days_late = max(0, delta.days + (1 if delta.seconds > 0 and delta.days >= 0 else 0))
+
+    if days_late <= 0:
+        return (0, 0)
+
+    # Công thức: tổng N ngày = 5N² + 15N (nghìn đồng)
+    # Ngày 1: 20k, ngày 2: 30k, ngày 3: 40k ...
+    # Tổng = sum(BASE_PENALTY + (i-1)*PENALTY_INCREMENT for i in 1..N)
+    #       = N*BASE_PENALTY + PENALTY_INCREMENT * N*(N-1)/2
+    penalty = days_late * BASE_PENALTY + PENALTY_INCREMENT * days_late * (days_late - 1) // 2
+
+    return (days_late, penalty)

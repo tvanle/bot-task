@@ -16,9 +16,12 @@ from config import (
 from views import (
     create_task_embed,
     create_task_list_embed,
+    create_penalty_embed,
+    create_penalties_board_embed,
     TaskActionView,
     TaskListView,
 )
+from database import calculate_penalty
 from github_webhook import GitHubWebhookHandler
 
 
@@ -109,12 +112,17 @@ class TaskBot(commands.Bot):
                     # Cập nhật status thành LATE
                     await database.update_task_status(task["id"], TaskStatus.LATE)
 
+                    # Tính phạt hiện tại
+                    days_late, penalty = calculate_penalty(task["end_date"])
+                    penalty_info = f"\n💰 Tiền phạt hiện tại: **{days_late}** ngày trễ → **{penalty}k**" if days_late > 0 else ""
+
                     # Gửi cảnh báo
                     await channel.send(
                         f"🚨 **CẢNH BÁO!** Task **#{task['id']}: {task['description'][:50]}** "
                         f"đã **QUÁ HẠN**!\n"
                         f"👤 Người thực hiện: <@{task['assignee_id']}>\n"
                         f"👨‍💼 Người giao: <@{task['assigner_id']}>"
+                        f"{penalty_info}"
                     )
 
                     # Cập nhật message gốc nếu có
@@ -355,6 +363,24 @@ async def task_help(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="💰 `/penalty @user`",
+        value="Xem chi tiết tiền phạt của một thành viên",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="💰 `/penalties`",
+        value="Bảng xếp hạng phạt team",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="🔓 `/excuse task_id`",
+        value="Miễn phạt cho task (chỉ người giao/Admin)",
+        inline=True,
+    )
+
+    embed.add_field(
         name="📊 Trạng thái Task",
         value="📋 TODO - Chưa bắt đầu\n"
         "🔄 IN_PROGRESS - Đang thực hiện\n"
@@ -375,6 +401,86 @@ async def task_help(interaction: discord.Interaction):
     embed.set_footer(text="Made with ❤️ for your team")
 
     await interaction.response.send_message(embed=embed)
+
+
+# ==================== PENALTY COMMANDS ====================
+
+
+@bot.tree.command(name="penalty", description="Xem tiền phạt của một thành viên")
+@app_commands.describe(user="Người cần xem phạt")
+async def penalty_command(interaction: discord.Interaction, user: discord.Member):
+    """Xem chi tiết tiền phạt của một thành viên."""
+    late_tasks = await database.get_late_tasks_by_user(user.id)
+    embed = create_penalty_embed(user, late_tasks)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="penalties", description="Bảng xếp hạng phạt team")
+async def penalties_command(interaction: discord.Interaction):
+    """Hiển thị bảng xếp hạng phạt của toàn team."""
+    all_late = await database.get_all_late_tasks()
+
+    # Group theo user, tính tổng phạt
+    user_penalties = {}
+    for task in all_late:
+        uid = task["assignee_id"]
+        uname = task["assignee_name"]
+        completed_at_str = task.get("completed_at")
+        _, penalty = calculate_penalty(task["end_date"], completed_at_str)
+
+        if uid not in user_penalties:
+            user_penalties[uid] = {"name": uname, "total": 0, "count": 0}
+        user_penalties[uid]["total"] += penalty
+        user_penalties[uid]["count"] += 1
+
+    # Sắp xếp theo tổng phạt giảm dần
+    penalty_data = sorted(
+        [
+            (uid, info["name"], info["total"], info["count"])
+            for uid, info in user_penalties.items()
+        ],
+        key=lambda x: x[2],
+        reverse=True,
+    )
+
+    embed = create_penalties_board_embed(penalty_data)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="excuse", description="Miễn phạt cho một task")
+@app_commands.describe(task_id="ID của task cần miễn phạt")
+async def excuse_command(interaction: discord.Interaction, task_id: int):
+    """Miễn phạt cho task (chỉ admin hoặc người giao mới được dùng)."""
+    task = await database.get_task_by_id(task_id)
+
+    if not task:
+        await interaction.response.send_message(
+            f"❌ Không tìm thấy task với ID #{task_id}", ephemeral=True
+        )
+        return
+
+    # Kiểm tra quyền: chỉ người giao hoặc admin
+    if (
+        interaction.user.id != task["assigner_id"]
+        and not interaction.user.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "❌ Bạn không có quyền miễn phạt! Chỉ người giao việc hoặc Admin mới có thể miễn phạt.",
+            ephemeral=True,
+        )
+        return
+
+    success = await database.excuse_task(task_id)
+
+    if success:
+        await interaction.response.send_message(
+            f"✅ Đã miễn phạt cho task **#{task_id}: {task['description'][:50]}**\n"
+            f"👤 Người thực hiện: <@{task['assignee_id']}>"
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ Có lỗi xảy ra khi miễn phạt!", ephemeral=True
+        )
 
 
 # ==================== RUN BOT ====================
