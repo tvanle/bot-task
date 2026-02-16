@@ -9,6 +9,7 @@ Bot Discord quản lý công việc cho team với đầy đủ tính năng: gia
 - **Cập nhật trạng thái**: Buttons và Dropdown để thay đổi status nhanh chóng
 - **Nhắc nhở tự động**: Bot tự động nhắc khi task sắp hết hạn
 - **Cảnh báo quá hạn**: Task quá deadline tự động chuyển sang LATE
+- **Hệ thống phạt trễ hạn**: Tự động tính tiền phạt theo số ngày trễ, xem bảng xếp hạng phạt team
 - **GitHub Integration**: Thông báo tự động khi có Issue/PR mới, assign, labels...
 
 ## Cài đặt
@@ -77,6 +78,9 @@ python bot.py
 | `/alltasks` | Xem tất cả task của team |
 | `/task task_id` | Xem chi tiết một task |
 | `/deletetask task_id` | Xóa task (chỉ người giao) |
+| `/penalty @user` | Xem chi tiết tiền phạt của một thành viên |
+| `/penalties` | Bảng xếp hạng phạt team |
+| `/excuse task_id` | Miễn phạt cho task (chỉ người giao/Admin) |
 | `/taskhelp` | Xem hướng dẫn |
 
 ### Ví dụ
@@ -124,6 +128,36 @@ Bot chạy background task mỗi 5 phút để:
 
 1. **Kiểm tra task sắp hết hạn**: Gửi nhắc nhở nếu còn dưới 60 phút (có thể config)
 2. **Kiểm tra task quá hạn**: Tự động đổi status sang LATE và gửi cảnh báo
+
+## Hệ thống phạt trễ hạn
+
+Bot tự động tính tiền phạt cho các task quá deadline:
+
+### Công thức tính phạt
+
+| Ngày trễ | Phạt ngày đó | Tổng phạt |
+|----------|-------------|-----------|
+| Ngày 1 | 20k | 20k |
+| Ngày 2 | 30k | 50k |
+| Ngày 3 | 40k | 90k |
+| Ngày N | (10 + 10N)k | (5N² + 15N)k |
+
+- **BASE_PENALTY**: 20k (ngày đầu tiên)
+- **PENALTY_INCREMENT**: +10k mỗi ngày sau
+
+### Cách hoạt động
+
+- Task quá hạn (status LATE): phạt **đang tính** (tăng mỗi ngày)
+- Task hoàn thành trễ (DONE nhưng `completed_at > end_date`): phạt **đã khóa** (cố định)
+- Miễn phạt: dùng `/excuse task_id` (chỉ người giao hoặc Admin)
+
+### Các lệnh phạt
+
+```
+/penalty @John          # Xem chi tiết phạt của John
+/penalties              # Bảng xếp hạng phạt cả team
+/excuse 5               # Miễn phạt cho task #5
+```
 
 ## GitHub Webhook Integration
 
@@ -196,7 +230,7 @@ WEBHOOK_PORT=8080
 Một số ý tưởng mở rộng:
 - Thêm priority levels (High, Medium, Low)
 - Thống kê hiệu suất làm việc
-- Export báo cáo ra file
+- Export báo cáo ra file (bao gồm bảng phạt)
 - Tích hợp calendar/Google Calendar
 - Recurring tasks (task lặp lại)
 
